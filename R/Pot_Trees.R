@@ -1,4 +1,4 @@
-# Potted Trees 2025 data analysis
+# Potted Trees 2025 data analysis-----
 ## 1. Load and clean ####
 library(readr)
 library(lubridate)
@@ -33,22 +33,25 @@ treepot <- treepot |>
     Year    = 2025,
     vigor   = Height.cm / Total.diamm.at.15mm,
     Block = substr(as.character(Block), 1, 1),
-    Block.last  = substr(as.character(Block), nchar(as.character(Block)), nchar(as.character(Block))),
-    Crown.diam.avg.diff.25.23 = (Crown.diam.1.Diff.25.23- Crown.Diameter.2.Diff.25.23)/2
+    Block.old  = substr(as.character(Block), nchar(as.character(Block)), nchar(as.character(Block))),
+    Crown.diam.avg.diff.25.23 = (Crown.diam.1.Diff.25.23 + Crown.Diameter.2.Diff.25.23)/2,
+    Block.first = substr(as.character(Block), 1, 1),
+    Sp = substr(as.character(ID), 1, 2),
   )
 
 
 ## Growth traits
 
 ##ID vars
-V_ID<-c("ID", "Species.latin", "Salt", "Biochar", "Block", "Samples")
+V_ID<-c("ID","Sp" , "Salt", "Biochar", "Block", "Samples", "Block.old","Species.latin")
 
 ##Growth vars
-V_growth<-c("Total.above.ground.biomass.g", "Below.ground.biomass.dry.g", "Root.shoot.Ratio", "Total.diamm.at.15mm","Diam.Diff.25.23", "Height.cm", "Height.Difference.25.23","Crown.diameter.average", "Crown.diam.avg.diff.25.23")
-treepot |>
+V_growth<-c("Total.above.ground.biomass.g", "Below.ground.biomass.dry.g", "Root.shoot.Ratio", "Total.diamm.at.15mm","Diam.Diff.25.23", "Height.cm", "Height.Difference.25.23","Crown.diameter.average", "Crown.diam.avg.diff.25.23","vigor")
+g<-treepot |>
   group_by(Species.latin) |>
-  summarise(across(V_growth, ~ sum(!is.na(.x)))) |>
-  print()
+  summarise(across(V_growth, ~ sum(!is.na(.x))))
+
+  print(g)
 
 ##Chemistry vars
 V_chem<-c("NITROGEN_ASIS", "P.", "K.", "MG.", "CA.", "NA.2","CL.2")
@@ -60,17 +63,21 @@ treepot |>
 #Leaf condition vars
 V_lc<-c("Licor.Aug.07","Licor.July.27","LICOR.Avg", "leaf.burns...leaves.on.tree","Leaf.burns...of.leaf.burned", "X..discolored","X..crown.missing")
 
-treepot |>
+lc<-treepot |>
   group_by(Species.latin) |>
-  summarise(across(all_of(V_lc), ~ sum(!is.na(.x)))) |>
-  print()
-  #one tree dead (Poplus deltoides, thus no LICOR on July 27th)
+  summarise(across(all_of(V_lc), ~ sum(!is.na(.x))))
+  print(lc)
+  #one tree dead (Poplus deltoides, during season, and Gelditsia triacanthos has leaves to small to scan with LICOR)
 #tree condition ratings
 V_tc <- treepot |>
   dplyr::select(Bris_cl0.5spring:etat_general_cl0.4summer) |>
   names()
+tc<-treepot |>
+  group_by(Species.latin) |>
+  summarise(across(all_of(V_tc), ~ sum(!is.na(.x))))
+print(tc)
 
-treepot<-treepot|>
+treepot <- treepot |>
   mutate(
     across(all_of(V_ID), as.factor),
     across(all_of(V_lc), as.numeric),
@@ -79,10 +86,72 @@ treepot<-treepot|>
     across(all_of(V_growth), as.numeric)
   )
 
+treepot_all<-treepot
+treepot <- treepot |>
+  dplyr::select(all_of(c(V_ID, V_growth, V_chem, V_lc, V_tc)))
 
 
 ## Saving cleaned dataset for possible future analysis
-treeb_cleaned<-treeb
-write.csv(treeb_cleaned, file.path("data", "cleaned", "treeb_cleaned.csv"))
-save(treeb_cleaned,
-     file = file.path("data", "cleaned", "treeb_cleaned.RData"))
+write.csv(treepot, file.path("data", "cleaned", "treepot_cleaned.csv"))
+save(treepot,
+     file = file.path("data", "cleaned", "treepot_cleaned.RData"))
+write.csv(treepot_all, file.path("data", "cleaned", "treepot_all.csv"))
+save(treepot_all,
+     file = file.path("data", "cleaned", "treepot_all.RData"))
+
+
+##2. Growth ----
+#2 types of growth data, whole, and whole-initial (2023 measurements)
+#should we remove one species?
+
+#growth vars are V_growth
+#equation
+rhs<-"Salt*Biochar"
+growth_models<- list()
+
+#lmer model loop for growth models
+library(lmerTest)   # lmer with p-values
+library(emmeans)
+species_list<-c(unique(treepot$Sp))
+rhs <- "Salt * Biochar"
+growth_models <- list()
+
+# traits where zero/negative values are impossible (not the *Diff* columns)
+V_positive <- setdiff(V_growth, grep("Diff", V_growth, value = TRUE))
+
+for (sp in names(species_list)) {
+  cat("\n\n##################################\n")
+  cat("Species:", sp, "\n")
+  cat("##################################\n")
+  
+  sp_dat <- species_list[[sp]]
+  growth_models[[sp]] <- list()
+  
+  for (v in V_growth) {
+    cat("\n==================================\n")
+    cat(sp, "|", "Growth trait:", v, "\n")
+    cat("==================================\n")
+    
+    tryCatch({
+      d <- sp_dat |> filter(!is.na(.data[[v]]))
+      if (v %in% V_positive) d <- d |> filter(.data[[v]] > 0)
+      
+      f <- as.formula(paste0(v, " ~ ", rhs, " + (1|Block)"))
+      m <- lmer(f, data = d, REML = TRUE)
+      growth_models[[sp]][[v]] <- m
+      
+      print(anova(m))                                  # Salt, Biochar, interaction
+      
+      emm_salt <- emmeans(m, ~ Salt)
+      emm_int  <- emmeans(m, ~ Salt | Biochar)
+      
+      print(summary(emm_salt, infer = TRUE))
+      print(summary(emm_int,  infer = TRUE))
+      print(pairs(emm_salt, adjust = "tukey"))
+      print(pairs(emm_int,  adjust = "tukey"))
+    }, error = function(e) {
+      cat("FAILED:", conditionMessage(e), "\n")
+    })
+  }
+}
+ }

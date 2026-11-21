@@ -67,7 +67,7 @@ write.csv(treeb_cleaned, file.path("data", "cleaned", "treeb_cleaned.csv"))
 save(treeb_cleaned,
      file = file.path("data", "cleaned", "treeb_cleaned.RData"))
 
-# 2.Growth meastreeb# 2.Growth measures####
+# 2.Growth measures treeb# 2.Growth measures####
   ##2a.Growth over time (each year 2023-2026) -------------------------
   ###Modelling LMER####
  #remove the F13 burnt tree for 2026
