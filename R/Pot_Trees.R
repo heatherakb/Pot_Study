@@ -32,8 +32,8 @@ treepot <- treepot |>
     ID      = factor(ID),
     Year    = 2025,
     vigor   = Height.cm / Total.diamm.at.15mm,
-    Block = substr(as.character(Block), 1, 1),
     Block.old  = substr(as.character(Block), nchar(as.character(Block)), nchar(as.character(Block))),
+    Block = substr(as.character(Block), 1, 1),
     Crown.diam.avg.diff.25.23 = (Crown.diam.1.Diff.25.23 + Crown.Diameter.2.Diff.25.23)/2,
     Block.first = substr(as.character(Block), 1, 1),
     Sp = substr(as.character(ID), 1, 2),
@@ -49,7 +49,7 @@ V_ID<-c("ID","Sp" , "Salt", "Biochar", "Block", "Samples", "Block.old","Species.
 V_growth<-c("Total.above.ground.biomass.g", "Below.ground.biomass.dry.g", "Root.shoot.Ratio", "Total.diamm.at.15mm","Diam.Diff.25.23", "Height.cm", "Height.Difference.25.23","Crown.diameter.average", "Crown.diam.avg.diff.25.23","vigor")
 g<-treepot |>
   group_by(Species.latin) |>
-  summarise(across(V_growth, ~ sum(!is.na(.x))))
+  summarise(across(all_of(V_growth), ~ sum(!is.na(.x))))
 
   print(g)
 
@@ -112,12 +112,25 @@ growth_models<- list()
 #lmer model loop for growth models
 library(lmerTest)   # lmer with p-values
 library(emmeans)
-species_list<-c(unique(treepot$Sp))
+species_list <- split(treepot, droplevels(treepot$Sp))
 rhs <- "Salt * Biochar"
 growth_models <- list()
 
 # traits where zero/negative values are impossible (not the *Diff* columns)
 V_positive <- setdiff(V_growth, grep("Diff", V_growth, value = TRUE))
+
+options(contrasts = c("contr.sum", "contr.poly"))   # for valid Type III tests
+alpha <- 0.1
+growth_models <- list()
+failed <- list()
+
+# helper: print estimates + Tukey pairwise for one emmeans spec
+show_emm <- function(m, specs, label) {
+  emm <- emmeans(m, specs)
+  cat("\n--- emmeans:", label, "---\n")
+  print(summary(emm, infer = TRUE))
+  print(pairs(emm, adjust = "tukey"))
+}
 
 for (sp in names(species_list)) {
   cat("\n\n##################################\n")
@@ -140,18 +153,49 @@ for (sp in names(species_list)) {
       m <- lmer(f, data = d, REML = TRUE)
       growth_models[[sp]][[v]] <- m
       
-      print(anova(m))                                  # Salt, Biochar, interaction
+      a <- anova(m, type = 3)
+      print(a)
       
-      emm_salt <- emmeans(m, ~ Salt)
-      emm_int  <- emmeans(m, ~ Salt | Biochar)
+      p <- a[["Pr(>F)"]]
+      names(p) <- rownames(a)
+      is_sig <- function(term) isTRUE(unname(p[term]) < alpha)   # NA/missing -> FALSE
       
-      print(summary(emm_salt, infer = TRUE))
-      print(summary(emm_int,  infer = TRUE))
-      print(pairs(emm_salt, adjust = "tukey"))
-      print(pairs(emm_int,  adjust = "tukey"))
+      if (is_sig("Salt"))         show_emm(m, ~ Salt,           "Salt")
+      if (is_sig("Biochar"))      show_emm(m, ~ Biochar,        "Biochar")
+      if (is_sig("Salt:Biochar")) {
+        show_emm(m, ~ Salt | Biochar, "Salt | Biochar")
+        show_emm(m, ~ Biochar | Salt, "Biochar | Salt")
+      }
+      
+      if (!any(sapply(c("Salt", "Biochar", "Salt:Biochar"), is_sig)))
+        cat("\n(no term significant at p <", alpha, "- emmeans skipped)\n")
+      
     }, error = function(e) {
       cat("FAILED:", conditionMessage(e), "\n")
+      failed[[length(failed) + 1]] <<- data.frame(
+        Species = sp, Trait = v, Error = conditionMessage(e)
+      )
     })
   }
 }
- }
+
+do.call(rbind, failed)   # which species/trait combos didn't fit
+for (sp in names(growth_models)) {
+  for (v in names(growth_models[[sp]])) {
+    cat("\n=== ANOVA (Type III, Satterthwaite):", sp, "|", v, "===\n")
+    print(anova(growth_models[[sp]][[v]]))
+  }
+}
+
+anova_tbl <- do.call(rbind, lapply(names(growth_models), function(sp) {
+  do.call(rbind, lapply(names(growth_models[[sp]]), function(v) {
+    a <- as.data.frame(anova(growth_models[[sp]][[v]], type = 3))
+    a$Term    <- rownames(a)
+    a$Species <- sp
+    a$Trait   <- v
+    a
+  }))
+}))
+rownames(anova_tbl) <- NULL
+anova_tbl
+
