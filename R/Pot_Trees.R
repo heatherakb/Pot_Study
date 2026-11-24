@@ -753,6 +753,147 @@ for (nm in names(plots_by_trait)) {
 plots_by_species[[3]]
 plots_by_trait[["LICOR"]]
 
+###plotting grid####
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+
+V_growth_matrix<-c(
+ "Shoot mass (g)",
+ "Root mass (g)",
+ "Root:shoot",
+ "Diam. change",
+ "Height change",
+ "Crown change",
+ "Vigor",
+)
+V_growth_change <- c("Total.above.ground.biomass.g",   # final biomass, no "change" version exists
+                  "Below.ground.biomass.dry.g",
+                  "Root.shoot.Ratio",
+                  "Diam.Diff.25.23",                # diameter change (replaces Total.diamm.at.15mm)
+                  "Height.Difference.25.23",        # height change (replaces Height.cm)
+                  "Crown.diam.avg.diff.25.23")      # crown change (replaces Crown.diameter.average)
+# ---- 1. matrix definition ----------------------------------------------------
+col_def <- bind_rows(
+  data.frame(Domain = "Growth",      Trait = V_growth_change),
+  data.frame(Domain = "Chemistry",   Trait = V_chem),
+  data.frame(Domain = "Leaf health", Trait = c("LICOR", setdiff(V_lc, c(lic_vars, "LICOR.Avg")))),
+  data.frame(Domain = "Tree health", Trait = V_tc)
+) |> mutate(Trait = shorten(Trait))
+
+sp_codes  <- names(species_list)
+sp_latin  <- ifelse(is.na(sp_label[sp_codes]), "", sp_label[sp_codes])
+sp_rowlab <- setNames(paste0(sp_codes, "\n", sp_latin), sp_codes)
+
+dom_fill <- c("Growth" = "#C6E0B4", "Chemistry" = "#BDD7EE",
+              "Leaf health" = "#FFE699", "Tree health" = "#F4B183")
+
+# ---- 2. building blocks ------------------------------------------------------
+dodge <- position_dodge(width = 0.8)
+
+cell_plot <- function(d) {
+  ggplot(d, aes(Salt, value, fill = Biochar, colour = Biochar)) +
+    geom_boxplot(position = dodge, alpha = 0.35, outlier.shape = NA, width = 0.7,
+                 linewidth = 0.3) +
+    geom_point(position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8),
+               alpha = 0.7, size = 0.7) +
+    stat_summary(fun = mean, geom = "point", position = dodge,
+                 shape = 23, size = 1.6, fill = "white", colour = "black") +
+    scale_fill_brewer(palette = "Set1") +
+    scale_colour_brewer(palette = "Set1") +
+    labs(x = NULL, y = NULL, subtitle = unique(d$terms)) +
+    theme_bw(base_size = 7) +
+    theme(plot.subtitle = element_text(size = 5.5),
+          legend.position = "bottom",
+          panel.grid.minor = element_blank())
+}
+
+wrap_txt <- function(x, w) paste(strwrap(x, w), collapse = "\n")
+
+text_cell <- function(label, fill, size = 3, face = "bold", wrap = 18) {
+  ggplot() +
+    annotate("text", x = 0.5, y = 0.5, label = wrap_txt(label, wrap),
+             size = size, fontface = face, lineheight = 0.9) +
+    xlim(0, 1) + ylim(0, 1) +
+    theme_void() +
+    theme(plot.background = element_rect(fill = fill, colour = "white", linewidth = 0.5))
+}
+
+# ---- 3. one matrix (rows = species, columns = traits) -------------------------
+build_grid <- function(sp_vec, cols, title = NULL, txt = 3) {
+  nr <- length(sp_vec); nc <- nrow(cols)
+  cells <- list()
+  
+  # header row 1: domain (name shown on the first column of each domain only)
+  cells <- c(cells, list(plot_spacer()))
+  for (j in seq_len(nc)) {
+    first <- j == 1 || cols$Domain[j] != cols$Domain[j - 1]
+    cells <- c(cells, list(text_cell(if (first) cols$Domain[j] else "",
+                                     dom_fill[[cols$Domain[j]]], size = txt + 0.5)))
+  }
+  # header row 2: trait names
+  cells <- c(cells, list(plot_spacer()))
+  for (j in seq_len(nc))
+    cells <- c(cells, list(text_cell(cols$Trait[j], dom_fill[[cols$Domain[j]]],
+                                     size = txt, wrap = 16)))
+  
+  # species rows
+  for (sp in sp_vec) {
+    cells <- c(cells, list(text_cell(sp_rowlab[[sp]], "grey90", size = txt, wrap = 16)))
+    for (j in seq_len(nc)) {
+      d <- plot_df[plot_df$Species == sp & plot_df$Trait == cols$Trait[j] &
+                     plot_df$Domain == cols$Domain[j], ]
+      cells <- c(cells, list(if (nrow(d) == 0) plot_spacer() else cell_plot(d)))
+    }
+  }
+  
+  g <- wrap_plots(cells, ncol = nc + 1,
+                  widths  = c(0.8, rep(1, nc)),
+                  heights = c(0.25, 0.45, rep(1, nr)),
+                  guides  = "collect")
+  if (!is.null(title))
+    g <- g + plot_annotation(title = title,
+                             theme = theme(plot.title = element_text(size = 12, face = "bold")))
+  g & theme(legend.position = "bottom")
+}
+
+n_sig <- function(sp_vec, cols)
+  sum(plot_df$Species %in% sp_vec & paste(plot_df$Domain, plot_df$Trait) %in%
+        paste(cols$Domain, cols$Trait))
+
+# ---- 4a. BIG version: one large page per domain -------------------------------
+cell_in <- 2.6                                   # inches per plot
+pdf(file.path(fig_dir, "Results_matrix_big.pdf"), onefile = TRUE,
+    width = 1.6 + cell_in * 12,  height = 2.2 + cell_in * length(sp_codes))
+# note: Width is fixed to the widest domain (12 columns) so all pages are the same size.
+for (dom in unique(col_def$Domain)) {
+  cols <- col_def[col_def$Domain == dom, ]
+  print(build_grid(sp_codes, cols,
+                   title = paste0(dom, " - significant treatment effects (p < ", alpha, ")"),
+                   txt = 4.5))
+}
+dev.off()
+
+# ---- 4b. STANDARD version: 20 cells per US Letter page (5 species x 4 variables)
+sp_blocks <- split(sp_codes, ceiling(seq_along(sp_codes) / 5))
+
+pdf(file.path(fig_dir, "Results_matrix_letter.pdf"), onefile = TRUE,
+    width = 8.5, height = 11)
+for (dom in unique(col_def$Domain)) {
+  cols_dom   <- col_def[col_def$Domain == dom, ]
+  col_blocks <- split(seq_len(nrow(cols_dom)), ceiling(seq_len(nrow(cols_dom)) / 4))
+  for (sb in seq_along(sp_blocks)) for (cb in col_blocks) {
+    cols <- cols_dom[cb, ]
+    if (n_sig(sp_blocks[[sb]], cols) == 0) next          # skip pages that would be empty
+    print(build_grid(sp_blocks[[sb]], cols,
+                     title = paste0(dom, " (species ", paste(range(match(sp_blocks[[sb]], sp_codes)), collapse = "-"),
+                                    " of ", length(sp_codes), ", p < ", alpha, ")"),
+                     txt = 2.6))
+  }
+}
+dev.off()
+
+
 # 7. Significant results summary: one sheet per species -----------------------
 library(openxlsx)
 library(emmeans)
@@ -919,3 +1060,205 @@ for (sp in all_sp) {
 }
 
 saveWorkbook(wb, file.path(table_dir, "Treepot_r_species.xlsx"), overwrite = TRUE)
+
+###PCA####
+library(vegan)      # adonis2, how()
+library(ggplot2)
+library(dplyr)
+
+lic_vars <- c("Licor.July.27", "Licor.Aug.07")
+pca_sets <- list(
+  "All"         = c(V_growth, V_chem, "LICOR.Avg",
+                    setdiff(V_lc, c(lic_vars, "LICOR.Avg")), V_tc),
+  "Growth"      = V_growth,
+  "Chemistry"   = V_chem,
+  "Leaf health" = c("LICOR.Avg", setdiff(V_lc, c(lic_vars, "LICOR.Avg"))),
+  "Tree health" = V_tc
+)
+
+run_pca <- function(sp, vars, set_name, min_complete = 0.8) {
+  d <- species_list[[sp]]
+  X <- as.data.frame(d[, vars])
+  X <- X[, colMeans(!is.na(X)) >= min_complete, drop = FALSE]
+  X <- X[, sapply(X, function(x) isTRUE(sd(x, na.rm = TRUE) > 0)), drop = FALSE]
+  ok   <- complete.cases(X)
+  X    <- X[ok, , drop = FALSE]
+  meta <- d[ok, c("Salt", "Biochar", "Block")] |> droplevels()
+  if (ncol(X) < 3 || nrow(X) < 10) return(NULL)
+  
+  pca <- prcomp(X, scale. = TRUE)
+  ve  <- 100 * pca$sdev^2 / sum(pca$sdev^2)
+  
+  # PERMANOVA on standardised data, permuting within Block
+  pm <- tryCatch(
+    adonis2(scale(X) ~ Salt * Biochar, data = meta, method = "euclidean",
+            permutations = how(nperm = 999, blocks = meta$Block), by = "terms"),
+    error = function(e) NULL)
+  pp <- function(term) if (is.null(pm) || !term %in% rownames(pm)) NA_real_ else pm[term, "Pr(>F)"]
+  
+  sc <- data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2], meta)
+  ld <- data.frame(var = shorten(rownames(pca$rotation)),
+                   PC1 = pca$rotation[, 1], PC2 = pca$rotation[, 2])
+  ld <- ld[order(-(ld$PC1^2 + ld$PC2^2)), ][seq_len(min(8, nrow(ld))), ]   # 8 strongest
+  mult <- 0.8 * min(diff(range(sc$PC1)) / diff(range(ld$PC1)),
+                    diff(range(sc$PC2)) / diff(range(ld$PC2)))
+  ld[c("PC1", "PC2")] <- ld[c("PC1", "PC2")] * mult
+  
+  p <- ggplot(sc, aes(PC1, PC2, colour = Salt, shape = Biochar)) +
+    geom_hline(yintercept = 0, colour = "grey80") +
+    geom_vline(xintercept = 0, colour = "grey80") +
+    stat_ellipse(aes(group = Salt), level = 0.68, linewidth = 0.4, show.legend = FALSE) +
+    geom_point(size = 2.5, alpha = 0.85) +
+    geom_segment(data = ld, aes(x = 0, y = 0, xend = PC1, yend = PC2),
+                 inherit.aes = FALSE, colour = "grey30",
+                 arrow = arrow(length = unit(0.12, "cm"))) +
+    geom_text(data = ld, aes(PC1, PC2, label = var), inherit.aes = FALSE,
+              size = 2.8, colour = "grey20", vjust = -0.4) +
+    scale_colour_brewer(palette = "Dark2") +
+    labs(title = paste0(sp, " ", ifelse(is.na(sp_label[sp]), "", sp_label[sp]), " - ", set_name),
+         subtitle = sprintf("n = %d trees, %d variables | PERMANOVA: Salt p=%.3f, Biochar p=%.3f, Salt\u00D7Biochar p=%.3f",
+                            nrow(X), ncol(X), pp("Salt"), pp("Biochar"), pp("Salt:Biochar")),
+         x = sprintf("PC1 (%.1f%%)", ve[1]), y = sprintf("PC2 (%.1f%%)", ve[2])) +
+    theme_bw() + theme(plot.subtitle = element_text(size = 8), legend.position = "bottom")
+  
+  list(plot = p,
+       info = data.frame(Species = sp, Set = set_name, n = nrow(X), p = ncol(X),
+                         PC1_pct = round(ve[1], 1), PC2_pct = round(ve[2], 1),
+                         p_Salt = pp("Salt"), p_Biochar = pp("Biochar"),
+                         p_SaltxBiochar = pp("Salt:Biochar")))
+}
+
+# run everything
+pca_res <- list()
+for (s in names(pca_sets)) for (sp in names(species_list))
+  pca_res[[paste(s, sp)]] <- tryCatch(run_pca(sp, pca_sets[[s]], s),
+                                      error = function(e) NULL)
+pca_res <- Filter(Negate(is.null), pca_res)
+
+pca_summary <- do.call(rbind, lapply(pca_res, `[[`, "info"))
+rownames(pca_summary) <- NULL
+pca_summary
+
+# one page per species x set
+pdf(file.path(fig_dir, "PCA_by_species.pdf"), width = 9, height = 7.5, onefile = TRUE)
+for (r in pca_res) print(r$plot)
+dev.off()
+
+pca_res[["All MB"]]$plot   # view one
+pca_res
+
+
+library(vegan)
+library(ggplot2)
+library(dplyr)
+
+lic_vars <- c("Licor.July.27", "Licor.Aug.07")
+pca_vars <- c(V_growth_change, V_chem, "LICOR.Avg",
+              setdiff(V_lc, c(lic_vars, "LICOR.Avg")), V_tc)
+
+dat <- as.data.frame(treepot)
+dat$Species <- droplevels(factor(dat$Sp))
+
+# ---- 1. choose variables so no species is lost ------------------------------
+# keep a variable only if every species has >= 50% of it measured
+# (otherwise one species with no LICOR or N data would remove all its trees)
+comp_by_sp <- sapply(pca_vars, function(v) tapply(!is.na(dat[[v]]), dat$Species, mean))
+keep <- colnames(comp_by_sp)[apply(comp_by_sp, 2, min) >= 0.5]
+cat("Dropped (too incomplete in at least one species):\n  ",
+    paste(shorten(setdiff(pca_vars, keep)), collapse = ", "), "\n")
+
+X0 <- dat[, keep, drop = FALSE]
+X0 <- X0[, sapply(X0, function(x) sd(x, na.rm = TRUE) > 0), drop = FALSE]
+ok <- complete.cases(X0)
+cat("Trees used:", sum(ok), "of", nrow(dat), "| variables:", ncol(X0), "\n")
+print(table(dat$Species[ok]))                      # trees per species that survive
+
+X    <- X0[ok, , drop = FALSE]
+meta <- dat[ok, c("Species", "Salt", "Biochar", "Block")] |> droplevels()
+meta$SpLatin <- ifelse(is.na(sp_label[as.character(meta$Species)]),
+                       as.character(meta$Species), sp_label[as.character(meta$Species)])
+
+# ---- 2. two scalings -----------------------------------------------------------
+X_all <- scale(X)                                              # across species
+X_within <- as.data.frame(lapply(X, function(x)                # within species
+  ave(x, meta$Species, FUN = function(z) {
+    s <- sd(z); if (is.na(s) || s == 0) rep(0, length(z)) else (z - mean(z)) / s })))
+X_within <- as.matrix(X_within)
+
+# ---- 3. plotting helper ----------------------------------------------------------
+make_pca <- function(Xm, colour_var, shape_var = NULL, title, subtitle, ellipse_by) {
+  pca <- prcomp(Xm, scale. = FALSE)               # already standardised
+  ve  <- 100 * pca$sdev^2 / sum(pca$sdev^2)
+  sc  <- cbind(data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2]), meta)
+  
+  ld <- data.frame(var = shorten(rownames(pca$rotation)),
+                   PC1 = pca$rotation[, 1], PC2 = pca$rotation[, 2])
+  ld <- ld[order(-(ld$PC1^2 + ld$PC2^2)), ][1:min(10, nrow(ld)), ]
+  mult <- 0.8 * min(diff(range(sc$PC1)) / diff(range(ld$PC1)),
+                    diff(range(sc$PC2)) / diff(range(ld$PC2)))
+  ld[c("PC1", "PC2")] <- ld[c("PC1", "PC2")] * mult
+  
+  aes_pts <- if (is.null(shape_var)) aes(colour = .data[[colour_var]])
+  else aes(colour = .data[[colour_var]], shape = .data[[shape_var]])
+  
+  p <- ggplot(sc, aes(PC1, PC2)) +
+    geom_hline(yintercept = 0, colour = "grey85") +
+    geom_vline(xintercept = 0, colour = "grey85") +
+    stat_ellipse(aes(group = .data[[ellipse_by]], colour = .data[[colour_var]]),
+                 level = 0.68, linewidth = 0.5, show.legend = FALSE) +
+    geom_point(aes_pts, size = 2.2, alpha = 0.8) +
+    geom_segment(data = ld, aes(x = 0, y = 0, xend = PC1, yend = PC2),
+                 inherit.aes = FALSE, colour = "grey30",
+                 arrow = arrow(length = unit(0.12, "cm"))) +
+    geom_text(data = ld, aes(PC1, PC2, label = var), inherit.aes = FALSE,
+              size = 2.8, colour = "grey15", vjust = -0.4) +
+    labs(title = title, subtitle = subtitle,
+         x = sprintf("PC1 (%.1f%%)", ve[1]), y = sprintf("PC2 (%.1f%%)", ve[2])) +
+    theme_bw() + theme(plot.subtitle = element_text(size = 8), legend.position = "right")
+  list(plot = p, pca = pca, scores = sc, ve = ve)
+}
+
+# ---- 4A. species grouping --------------------------------------------------------
+pm_sp <- adonis2(X_all ~ Species, data = meta, method = "euclidean", permutations = 999)
+A <- make_pca(X_all, "SpLatin", title = "PCA of all species, all traits (grouped by species)",
+              subtitle = sprintf("n = %d trees, %d variables | PERMANOVA Species R\u00B2 = %.2f, p = %.3f",
+                                 nrow(X), ncol(X), pm_sp$R2[1], pm_sp$`Pr(>F)`[1]),
+              ellipse_by = "SpLatin") 
+A$plot <- A$plot + scale_colour_manual(values = scales::hue_pal()(nlevels(meta$Species)),
+                                       name = "Species")
+
+# ---- 4B. treatment grouping (species effect removed) -------------------------------
+pm_tr <- adonis2(X_within ~ Salt * Biochar, data = meta, method = "euclidean",
+                 permutations = how(nperm = 999, blocks = meta$Species), by = "terms")
+B <- make_pca(X_within, "Salt", "Biochar",
+              title = "PCA of all species, all traits (grouped by treatment; scaled within species)",
+              subtitle = sprintf("n = %d trees, %d variables | PERMANOVA (permuted within species): Salt p=%.3f, Biochar p=%.3f, Salt\u00D7Biochar p=%.3f",
+                                 nrow(X), ncol(X), pm_tr["Salt", "Pr(>F)"],
+                                 pm_tr["Biochar", "Pr(>F)"], pm_tr["Salt:Biochar", "Pr(>F)"]),
+              ellipse_by = "Salt")
+B$plot <- B$plot + scale_colour_brewer(palette = "Dark2")
+
+# treatment PCA, one panel per species (same axes, so panels are comparable)
+B_facet <- ggplot(B$scores, aes(PC1, PC2, colour = Salt, shape = Biochar)) +
+  geom_hline(yintercept = 0, colour = "grey85") + geom_vline(xintercept = 0, colour = "grey85") +
+  geom_point(size = 1.8, alpha = 0.85) +
+  facet_wrap(~ SpLatin, ncol = 4) +
+  scale_colour_brewer(palette = "Dark2") +
+  labs(title = "Treatment PCA split by species",
+       x = sprintf("PC1 (%.1f%%)", B$ve[1]), y = sprintf("PC2 (%.1f%%)", B$ve[2])) +
+  theme_bw() + theme(legend.position = "bottom", strip.text = element_text(size = 7))
+
+# ---- 5. save -----------------------------------------------------------------------
+pdf(file.path(fig_dir, "PCA_all_species_final.pdf"), width = 10, height = 7.5, onefile = TRUE)
+print(A$plot); print(B$plot); print(B_facet)
+dev.off()
+ggsave(file.path(fig_dir, "PCA_species.png"),   A$plot, width = 10, height = 7.5, dpi = 300)
+ggsave(file.path(fig_dir, "PCA_treatment.png"), B$plot, width = 10, height = 7.5, dpi = 300)
+
+# loadings table, to cite which traits drive each axis
+load_tbl <- function(R) {
+  l <- as.data.frame(R$pca$rotation[, 1:3]); l$Trait <- shorten(rownames(l)); rownames(l) <- NULL
+  l[, c("Trait", "PC1", "PC2", "PC3")]
+}
+load_species   <- load_tbl(A)
+load_treatment <- load_tbl(B)
