@@ -1262,3 +1262,394 @@ load_tbl <- function(R) {
 }
 load_species   <- load_tbl(A)
 load_treatment <- load_tbl(B)
+
+
+###excel 2: matrix with arrows####
+library(openxlsx)
+library(emmeans)
+library(ARTool)
+library(dplyr)
+library(ggplot2)
+
+alpha <- 0.1
+require_sig_contrast <- TRUE   # TRUE: arrow only if the N vs H contrast itself is p < alpha
+# FALSE: arrow whenever the Salt (or Salt x Biochar) F-test is p < alpha
+
+sets <- list(
+  "Growth"      = list(models = growth_models, type = "lmer"),
+  "Chemistry"   = list(models = chem_models,   type = "lmer"),
+  "Leaf health" = list(models = lf_models,     type = "lmer"),
+  "Tree health" = list(models = tc_models,     type = "art")
+)
+
+# ---- columns (original trait names, so we can find the models) ----------------
+col_x <- bind_rows(
+  data.frame(Domain = "Growth",      Trait = V_growth_change),
+  data.frame(Domain = "Chemistry",   Trait = V_chem),
+  data.frame(Domain = "Leaf health", Trait = c("LICOR", setdiff(V_lc, c(lic_vars, "LICOR.Avg")))),
+  data.frame(Domain = "Tree health", Trait = V_tc)
+) |> mutate(Short = shorten(Trait), col = row_number())
+
+sp_codes <- names(species_list)
+sp_label_full <- setNames(paste0(sp_codes, " ", ifelse(is.na(sp_label[sp_codes]), "", sp_label[sp_codes])), sp_codes)
+
+# ---- helpers ------------------------------------------------------------------
+anova_p <- function(m, type) {
+  a <- as.data.frame(if (type == "lmer") anova(m, type = 3) else anova(m))
+  terms <- if ("Term" %in% names(a)) trimws(as.character(a$Term)) else rownames(a)
+  setNames(a[["Pr(>F)"]], terms)
+}
+
+get_emm <- function(m, specs, term, type)
+  if (type == "lmer") emmeans(m, specs) else emmeans(artlm(m, term), specs)
+
+# N vs H contrast only, with direction (H_higher = TRUE if H > N)
+nh_contrast <- function(emm) {
+  df <- as.data.frame(pairs(emm, adjust = "tukey"))
+  lv <- strsplit(gsub("[()]", "", as.character(df$contrast)), " - ", fixed = TRUE)
+  keep <- sapply(lv, function(x) setequal(trimws(x), c("N", "H")))
+  df <- df[keep, , drop = FALSE]; lv <- lv[keep]
+  if (nrow(df) == 0) return(NULL)
+  first <- trimws(sapply(lv, `[`, 1))
+  df$H_higher <- ifelse(first == "N", df$estimate < 0, df$estimate > 0)
+  df
+}
+
+cell_arrows <- function(m, type) {
+  p   <- anova_p(m, type)
+  sig <- function(t) isTRUE(unname(p[t]) < alpha)
+  if (sig("Salt:Biochar")) {                       # interaction: one arrow per Biochar level
+    term <- "Salt:Biochar"
+    ct <- nh_contrast(get_emm(m, ~ Salt | Biochar, term, type))
+    bio <- if (is.null(ct)) NULL else as.character(ct$Biochar)
+  } else if (sig("Salt")) {                        # main effect: single arrow
+    term <- "Salt"
+    ct <- nh_contrast(get_emm(m, ~ Salt, term, type))
+    bio <- if (is.null(ct)) NULL else ""
+  } else return(NULL)
+  if (is.null(ct)) return(NULL)
+  out <- data.frame(dir = ifelse(ct$H_higher, "up", "down"), Bio = bio,
+                    contrast_p = ct$p.value, term = term, anova_p = unname(p[term]))
+  if (require_sig_contrast) out <- out[!is.na(out$contrast_p) & out$contrast_p < alpha, ]
+  if (nrow(out) == 0) return(NULL)
+  out[order(match(out$Bio, c("", "B", "S"))), ]
+}
+
+# ---- collect arrows -------------------------------------------------------------
+arrows <- do.call(rbind, lapply(seq_len(nrow(col_x)), function(j) {
+  d <- col_x$Domain[j]; tr <- col_x$Trait[j]
+  do.call(rbind, lapply(sp_codes, function(sp) {
+    m <- sets[[d]]$models[[sp]][[tr]]
+    if (is.null(m)) return(NULL)
+    r <- tryCatch(cell_arrows(m, sets[[d]]$type), error = function(e) NULL)
+    if (is.null(r)) return(NULL)
+    cbind(Species = sp, Domain = d, Trait = tr, Short = col_x$Short[j], col = j, r)
+  }))
+}))
+rownames(arrows) <- NULL
+
+arrows <- arrows |>
+  group_by(Species, col) |>
+  mutate(k = n(), idx = row_number(),
+         state = ifelse(all(dir == "up"), "up", ifelse(all(dir == "down"), "down", "mixed"))) |>
+  ungroup()
+
+# ---- EXCEL ----------------------------------------------------------------------
+dom_fill <- c("Growth" = "#C6E0B4", "Chemistry" = "#BDD7EE",
+              "Leaf health" = "#FFE699", "Tree health" = "#F4B183")
+state_fill <- c(up = "#F8CBAD", down = "#BDD7EE", mixed = "#E4DFEC")
+
+mat <- matrix("", nrow = length(sp_codes), ncol = nrow(col_x),
+              dimnames = list(sp_codes, NULL))
+for (i in seq_len(nrow(arrows))) {
+  a <- arrows[i, ]
+  sym <- if (a$dir == "up") "\u2191" else "\u2193"
+  lab <- if (a$Bio == "") sym else paste(sym, a$Bio)
+  cur <- mat[a$Species, a$col]
+  mat[a$Species, a$col] <- if (cur == "") lab else paste(cur, lab, sep = "\n")
+}
+
+wb <- createWorkbook()
+addWorksheet(wb, "Matrix")
+ctr <- createStyle(halign = "center", valign = "center", wrapText = TRUE)
+
+# headers
+writeData(wb, "Matrix", "Species", startCol = 1, startRow = 2)
+for (dom in unique(col_x$Domain)) {
+  cols <- which(col_x$Domain == dom) + 1
+  writeData(wb, "Matrix", dom, startCol = min(cols), startRow = 1)
+  if (length(cols) > 1) mergeCells(wb, "Matrix", cols = cols, rows = 1)
+  addStyle(wb, "Matrix", createStyle(textDecoration = "bold", fgFill = dom_fill[[dom]],
+                                     halign = "center", border = "TopBottomLeftRight"),
+           rows = 1, cols = cols, gridExpand = TRUE)
+  addStyle(wb, "Matrix", createStyle(textDecoration = "bold", fgFill = dom_fill[[dom]],
+                                     halign = "center", valign = "center", wrapText = TRUE,
+                                     border = "TopBottomLeftRight"),
+           rows = 2, cols = cols, gridExpand = TRUE)
+}
+writeData(wb, "Matrix", t(col_x$Short), startCol = 2, startRow = 2, colNames = FALSE)
+
+# body
+writeData(wb, "Matrix", sp_label_full[sp_codes], startCol = 1, startRow = 3, colNames = FALSE)
+writeData(wb, "Matrix", mat, startCol = 2, startRow = 3, colNames = FALSE)
+nr <- length(sp_codes); nc <- nrow(col_x)
+addStyle(wb, "Matrix", createStyle(fontSize = 16, halign = "center", valign = "center",
+                                   wrapText = TRUE, border = "TopBottomLeftRight",
+                                   borderColour = "grey70"),
+         rows = 3:(nr + 2), cols = 2:(nc + 1), gridExpand = TRUE)
+addStyle(wb, "Matrix", createStyle(textDecoration = "bold", fgFill = "grey90", valign = "center",
+                                   border = "TopBottomLeftRight", borderColour = "grey70"),
+         rows = 3:(nr + 2), cols = 1, gridExpand = TRUE)
+for (i in seq_len(nrow(arrows))) {
+  a <- arrows[i, ]
+  if (a$idx > 1) next                                   # style each cell once
+  addStyle(wb, "Matrix",
+           createStyle(fontSize = 16, halign = "center", valign = "center", wrapText = TRUE,
+                       fgFill = state_fill[[a$state]],
+                       fontColour = switch(a$state, up = "#C55A11", down = "#2E75B6", mixed = "#5B4B8A"),
+                       textDecoration = "bold", border = "TopBottomLeftRight", borderColour = "grey70"),
+           rows = match(a$Species, sp_codes) + 2, cols = a$col + 1, stack = FALSE)
+}
+setColWidths(wb, "Matrix", cols = 1, widths = 30)
+setColWidths(wb, "Matrix", cols = 2:(nc + 1), widths = 13)
+setRowHeights(wb, "Matrix", rows = 2, heights = 32)
+setRowHeights(wb, "Matrix", rows = 3:(nr + 2), heights = 38)
+freezePane(wb, "Matrix", firstActiveRow = 3, firstActiveCol = 2)
+
+leg <- nr + 4
+writeData(wb, "Matrix", c(
+  paste0("\u2191 = H salt higher than N salt;  \u2193 = H salt lower than N salt (L not shown)."),
+  "Two arrows in a cell = Salt x Biochar interaction: B = with biochar, S = soil without biochar.",
+  paste0("Blank = no significant Salt effect (p < ", alpha, ")",
+         if (require_sig_contrast) " in the Tukey N-H contrast." else " in the ANOVA."),
+  "Tree health: direction is on the aligned-rank scale (up = higher rating score)."
+), startCol = 1, startRow = leg, colNames = FALSE)
+
+# details sheet
+addWorksheet(wb, "Details")
+det <- arrows |>
+  transmute(Species, Domain, Trait = Short,
+            Biochar = ifelse(Bio == "", "(averaged)", Bio),
+            Direction = ifelse(dir == "up", "H > N", "H < N"),
+            ANOVA_term = term, ANOVA_p = anova_p, NH_contrast_p = contrast_p)
+writeData(wb, "Details", det, headerStyle = createStyle(textDecoration = "bold", fgFill = "#D9E1F2"))
+addStyle(wb, "Details", createStyle(numFmt = "0.000000000"), rows = 2:(nrow(det) + 1),
+         cols = 7:8, gridExpand = TRUE)
+setColWidths(wb, "Details", cols = 1:8, widths = c(10, 14, 26, 12, 12, 14, 16, 16))
+
+saveWorkbook(wb, file.path(table_dir, "Arrow_matrix_H_vs_N.xlsx"), overwrite = TRUE)
+
+# ---- PICTURE ---------------------------------------------------------------------
+grid <- expand.grid(col = col_x$col, row = seq_along(sp_codes))
+grid$Species <- sp_codes[grid$row]
+grid$Domain  <- col_x$Domain[grid$col]
+grid <- left_join(grid, distinct(arrows, Species, col, state), by = c("Species", "col"))
+grid$state[is.na(grid$state)] <- "none"
+grid$y <- length(sp_codes) - grid$row + 1
+
+ar <- arrows |>
+  mutate(y = length(sp_codes) - match(Species, sp_codes) + 1,
+         xx = col + ifelse(k == 1, 0, ifelse(idx == 1, -0.2, 0.2)),
+         y0 = ifelse(dir == "up", y - 0.22, y + 0.22),
+         y1 = ifelse(dir == "up", y + 0.22, y - 0.22))
+
+col_x$Domain <- factor(col_x$Domain, levels = unique(col_x$Domain))
+grid$Domain  <- factor(grid$Domain,  levels = levels(col_x$Domain))
+ar$Domain    <- factor(ar$Domain,    levels = levels(col_x$Domain))
+
+p_arrow <- ggplot() +
+  geom_tile(data = grid, aes(col, y, fill = state), colour = "grey70", width = 1, height = 1) +
+  geom_segment(data = ar, aes(x = xx, xend = xx, y = y0, yend = y1, colour = dir),
+               linewidth = 1.1, arrow = arrow(length = unit(0.18, "cm"), type = "closed")) +
+  geom_text(data = filter(ar, Bio != ""), aes(x = xx + 0.08, y = y, label = Bio),
+            hjust = 0, size = 3.2, fontface = "bold") +
+  facet_grid(. ~ Domain, scales = "free_x", space = "free_x") +
+  scale_x_continuous(breaks = col_x$col, labels = col_x$Short, expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq_along(sp_codes),
+                     labels = rev(sp_label_full[sp_codes]), expand = c(0, 0)) +
+  scale_fill_manual(values = c(none = "white", state_fill)) +
+  scale_colour_manual(values = c(up = "#C55A11", down = "#2E75B6")) +
+  labs(x = NULL, y = NULL,
+       title = "Effect of high salt (H) relative to neutral (N)",
+       subtitle = paste0("\u2191 H higher than N, \u2193 H lower than N (p < ", alpha,
+                         "); two arrows = Salt \u00D7 Biochar interaction (B = biochar, S = soil); blank = not significant")) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "none",
+        panel.grid = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(face = "italic"),
+        strip.text = element_text(face = "bold"),
+        panel.spacing = unit(0.3, "cm"))
+
+ggsave(file.path(fig_dir, "Arrow_matrix_H_vs_N.png"), p_arrow,
+       width = 0.55 * nrow(col_x) + 4, height = 0.6 * length(sp_codes) + 3, dpi = 250)
+p_arrow
+  
+
+# ---- Biochar arrow matrix: B vs S -------------------------------------------
+# up = biochar (B) higher than no biochar (S); down = B lower than S
+
+bs_contrast <- function(emm) {
+  df <- as.data.frame(pairs(emm, adjust = "tukey"))
+  lv <- strsplit(gsub("[()]", "", as.character(df$contrast)), " - ", fixed = TRUE)
+  first <- trimws(sapply(lv, `[`, 1))
+  df$B_higher <- ifelse(first == "B", df$estimate > 0, df$estimate < 0)
+  df
+}
+
+cell_arrows_bio <- function(m, type) {
+  p   <- anova_p(m, type)
+  sig <- function(t) isTRUE(unname(p[t]) < alpha)
+  if (sig("Salt:Biochar")) {                     # interaction: one arrow per Salt level
+    term <- "Salt:Biochar"
+    ct  <- bs_contrast(get_emm(m, ~ Biochar | Salt, term, type))
+    lab <- as.character(ct$Salt)
+  } else if (sig("Biochar")) {                   # main effect: single arrow
+    term <- "Biochar"
+    ct  <- bs_contrast(get_emm(m, ~ Biochar, term, type))
+    lab <- rep("", nrow(ct))
+  } else return(NULL)
+  out <- data.frame(dir = ifelse(ct$B_higher, "up", "down"), Lab = lab,
+                    contrast_p = ct$p.value, term = term, anova_p = unname(p[term]))
+  if (require_sig_contrast) out <- out[!is.na(out$contrast_p) & out$contrast_p < alpha, ]
+  if (nrow(out) == 0) return(NULL)
+  out[order(match(out$Lab, c("", "N", "L", "H"))), ]
+}
+
+# ---- collect ------------------------------------------------------------------
+arrows_b <- do.call(rbind, lapply(seq_len(nrow(col_x)), function(j) {
+  d <- col_x$Domain[j]; tr <- col_x$Trait[j]
+  do.call(rbind, lapply(sp_codes, function(sp) {
+    m <- sets[[d]]$models[[sp]][[tr]]
+    if (is.null(m)) return(NULL)
+    r <- tryCatch(cell_arrows_bio(m, sets[[d]]$type), error = function(e) NULL)
+    if (is.null(r)) return(NULL)
+    cbind(Species = sp, Domain = d, Trait = tr, Short = col_x$Short[j], col = j, r)
+  }))
+}))
+rownames(arrows_b) <- NULL
+
+arrows_b <- arrows_b |>
+  group_by(Species, col) |>
+  mutate(k = n(), idx = row_number(),
+         state = ifelse(all(dir == "up"), "up", ifelse(all(dir == "down"), "down", "mixed"))) |>
+  ungroup()
+
+# ---- EXCEL --------------------------------------------------------------------
+mat <- matrix("", nrow = length(sp_codes), ncol = nrow(col_x), dimnames = list(sp_codes, NULL))
+for (i in seq_len(nrow(arrows_b))) {
+  a <- arrows_b[i, ]
+  sym <- if (a$dir == "up") "\u2191" else "\u2193"
+  lab <- if (a$Lab == "") sym else paste(sym, a$Lab)
+  cur <- mat[a$Species, a$col]
+  mat[a$Species, a$col] <- if (cur == "") lab else paste(cur, lab, sep = "\n")
+}
+
+wb <- createWorkbook()
+addWorksheet(wb, "Matrix")
+nr <- length(sp_codes); nc <- nrow(col_x)
+
+writeData(wb, "Matrix", "Species", startCol = 1, startRow = 2)
+for (dom in unique(col_x$Domain)) {
+  cols <- which(col_x$Domain == dom) + 1
+  writeData(wb, "Matrix", dom, startCol = min(cols), startRow = 1)
+  if (length(cols) > 1) mergeCells(wb, "Matrix", cols = cols, rows = 1)
+  addStyle(wb, "Matrix", createStyle(textDecoration = "bold", fgFill = dom_fill[[dom]],
+                                     halign = "center", border = "TopBottomLeftRight"),
+           rows = 1, cols = cols, gridExpand = TRUE)
+  addStyle(wb, "Matrix", createStyle(textDecoration = "bold", fgFill = dom_fill[[dom]],
+                                     halign = "center", valign = "center", wrapText = TRUE,
+                                     border = "TopBottomLeftRight"),
+           rows = 2, cols = cols, gridExpand = TRUE)
+}
+writeData(wb, "Matrix", t(col_x$Short), startCol = 2, startRow = 2, colNames = FALSE)
+writeData(wb, "Matrix", sp_label_full[sp_codes], startCol = 1, startRow = 3, colNames = FALSE)
+writeData(wb, "Matrix", mat, startCol = 2, startRow = 3, colNames = FALSE)
+
+addStyle(wb, "Matrix", createStyle(fontSize = 14, halign = "center", valign = "center",
+                                   wrapText = TRUE, border = "TopBottomLeftRight",
+                                   borderColour = "grey70"),
+         rows = 3:(nr + 2), cols = 2:(nc + 1), gridExpand = TRUE)
+addStyle(wb, "Matrix", createStyle(textDecoration = "bold", fgFill = "grey90", valign = "center",
+                                   border = "TopBottomLeftRight", borderColour = "grey70"),
+         rows = 3:(nr + 2), cols = 1, gridExpand = TRUE)
+for (i in seq_len(nrow(arrows_b))) {
+  a <- arrows_b[i, ]
+  if (a$idx > 1) next
+  addStyle(wb, "Matrix",
+           createStyle(fontSize = 14, halign = "center", valign = "center", wrapText = TRUE,
+                       fgFill = state_fill[[a$state]],
+                       fontColour = switch(a$state, up = "#C55A11", down = "#2E75B6", mixed = "#5B4B8A"),
+                       textDecoration = "bold", border = "TopBottomLeftRight", borderColour = "grey70"),
+           rows = match(a$Species, sp_codes) + 2, cols = a$col + 1, stack = FALSE)
+}
+setColWidths(wb, "Matrix", cols = 1, widths = 30)
+setColWidths(wb, "Matrix", cols = 2:(nc + 1), widths = 13)
+setRowHeights(wb, "Matrix", rows = 2, heights = 32)
+setRowHeights(wb, "Matrix", rows = 3:(nr + 2), heights = 52)   # room for up to 3 arrows
+freezePane(wb, "Matrix", firstActiveRow = 3, firstActiveCol = 2)
+
+writeData(wb, "Matrix", c(
+  "\u2191 = biochar (B) higher than no biochar (S);  \u2193 = biochar lower than S.",
+  "Several arrows in a cell = Salt x Biochar interaction: the label (N, L, H) is the salt level the B vs S comparison was made in.",
+  paste0("Blank = no significant Biochar effect (p < ", alpha, ")",
+         if (require_sig_contrast) " in the Tukey B-S contrast." else " in the ANOVA."),
+  "Tree health: direction is on the aligned-rank scale (up = higher rating score)."
+), startCol = 1, startRow = nr + 4, colNames = FALSE)
+
+addWorksheet(wb, "Details")
+det <- arrows_b |>
+  transmute(Species, Domain, Trait = Short,
+            Salt_level = ifelse(Lab == "", "(averaged)", Lab),
+            Direction = ifelse(dir == "up", "B > S", "B < S"),
+            ANOVA_term = term, ANOVA_p = anova_p, BS_contrast_p = contrast_p)
+writeData(wb, "Details", det, headerStyle = createStyle(textDecoration = "bold", fgFill = "#D9E1F2"))
+addStyle(wb, "Details", createStyle(numFmt = "0.000000000"), rows = 2:(nrow(det) + 1),
+         cols = 7:8, gridExpand = TRUE)
+setColWidths(wb, "Details", cols = 1:8, widths = c(10, 14, 26, 12, 12, 14, 16, 16))
+
+saveWorkbook(wb, file.path(table_dir, "Arrow_matrix_B_vs_S.xlsx"), overwrite = TRUE)
+
+# ---- PICTURE ------------------------------------------------------------------
+grid <- expand.grid(col = col_x$col, row = seq_along(sp_codes))
+grid$Species <- sp_codes[grid$row]
+grid$Domain  <- factor(col_x$Domain[grid$col], levels = unique(col_x$Domain))
+grid <- left_join(grid, distinct(arrows_b, Species, col, state), by = c("Species", "col"))
+grid$state[is.na(grid$state)] <- "none"
+grid$y <- length(sp_codes) - grid$row + 1
+
+off <- function(k, idx) ifelse(k == 1, 0,
+                               ifelse(k == 2, c(-0.2, 0.2)[idx], c(-0.3, 0, 0.3)[idx]))
+ar <- arrows_b |>
+  mutate(y  = length(sp_codes) - match(Species, sp_codes) + 1,
+         xx = col + mapply(off, k, idx),
+         y0 = ifelse(dir == "up", y - 0.22, y + 0.22),
+         y1 = ifelse(dir == "up", y + 0.22, y - 0.22),
+         Domain = factor(Domain, levels = unique(col_x$Domain)))
+
+p_bio <- ggplot() +
+  geom_tile(data = grid, aes(col, y, fill = state), colour = "grey70", width = 1, height = 1) +
+  geom_segment(data = ar, aes(x = xx, xend = xx, y = y0, yend = y1, colour = dir),
+               linewidth = 1.1, arrow = arrow(length = unit(0.18, "cm"), type = "closed")) +
+  geom_text(data = filter(ar, Lab != ""), aes(x = xx + 0.06, y = y, label = Lab),
+            hjust = 0, size = 2.8, fontface = "bold") +
+  facet_grid(. ~ Domain, scales = "free_x", space = "free_x") +
+  scale_x_continuous(breaks = col_x$col, labels = col_x$Short, expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq_along(sp_codes), labels = rev(sp_label_full[sp_codes]),
+                     expand = c(0, 0)) +
+  scale_fill_manual(values = c(none = "white", state_fill)) +
+  scale_colour_manual(values = c(up = "#C55A11", down = "#2E75B6")) +
+  labs(x = NULL, y = NULL,
+       title = "Effect of biochar (B) relative to no biochar (S)",
+       subtitle = paste0("\u2191 B higher than S, \u2193 B lower than S (p < ", alpha,
+                         "); several arrows = Salt \u00D7 Biochar interaction (label = salt level); blank = not significant")) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "none", panel.grid = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(face = "italic"),
+        strip.text = element_text(face = "bold"),
+        panel.spacing = unit(0.3, "cm"))
+
+ggsave(file.path(fig_dir, "Arrow_matrix_B_vs_S.png"), p_bio,
+       width = 0.55 * nrow(col_x) + 4, height = 0.6 * length(sp_codes) + 3, dpi = 250)
+p_bio
