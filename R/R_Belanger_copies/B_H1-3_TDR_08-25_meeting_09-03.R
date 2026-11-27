@@ -25,7 +25,6 @@ project_root <- here::here()
 data_dir <- file.path(project_root, "data", "raw")
 figure_dir <- file.path(project_root, "outputs", "figures")
 table_dir <- file.path(project_root, "outputs", "tables")
-dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
 TDRb_allyrs <- read.csv(file.path(data_dir,"TDR-Belanger-2023-2026.csv"), fileEncoding = "latin1")
 summary(TDRb_allyrs)
@@ -83,6 +82,8 @@ TDRb_allyrs_cleaned<-TDRb_allyrs
 write.csv(TDRb_allyrs_cleaned, file.path("data", "cleaned", "TDRb_allyrs_cleaned.csv"))
 save(TDRb_allyrs_cleaned,
      file = file.path("data", "cleaned", "TDRb_allyrs_cleaned.RData"))
+save(TDRb_allyrs_cleaned,
+     file = file.path ("C:/Users/heath/Document (Local Only)/Coding/Pot_Study/Data/cleaned"))
 #2. Models----------------------------------------------------
 ## 2.1.1 Humidity models ####
 #humidity is also important for tree health, apart from how it affects conductivity, lets investigate
